@@ -32,8 +32,7 @@ const App: React.FC = () => {
 
   const pdfPreviewParams = {
     pageNumber: 3,
-    quote:
-      "In summary, our contributions are as follows. First, we show how to combine online MCMC methods with model distillation in order to get a simple",
+    quote: "Second, we show that our probabilistic predictions lead to imp",
   };
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
 
@@ -69,31 +68,7 @@ const App: React.FC = () => {
     setTextItems(textContent.items as PDFTextItem[]);
   }, []);
 
-  const applyHighlight = useCallback(async () => {
-    const canvas = canvasRefs.current[pdfPreviewParams.pageNumber - 1];
-    if (!canvas || textItems.length === 0) return;
-
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    // Get the PDF page element
-    const pdfPage = pdfRef.current?.querySelector(
-      `.react-pdf__Page[data-page-number="${pdfPreviewParams.pageNumber}"]`
-    ) as HTMLElement | null;
-
-    if (!pdfPage) {
-      console.error("PDF page element not found");
-      return;
-    }
-
-    // Set canvas dimensions
-    canvas.width = pdfPage.clientWidth;
-    canvas.height = pdfPage.clientHeight;
-
-    // Clear the canvas
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Separate text items into lines
+  const processedTextItems = useMemo(() => {
     const lines: PDFTextItem[][] = [];
     let currentLine: PDFTextItem[] = [];
     textItems.forEach((item) => {
@@ -105,49 +80,109 @@ const App: React.FC = () => {
     });
     if (currentLine.length > 0) lines.push(currentLine);
 
-    // Match the quote across lines
-    let bestMatchStartIndex = -1;
-    let bestMatchEndIndex = -1;
-    let bestMatchScore = -Infinity;
-    let matchedLines: PDFTextItem[][] = [];
+    return lines;
+  }, [textItems]);
 
-    for (let i = 0; i < lines.length; i++) {
-      for (let j = i; j < lines.length; j++) {
-        const lineText = lines
-          .slice(i, j + 1)
-          .flat()
-          .map((item) => item.str)
-          .join(" ");
-        const score = stringSimilarity.compareTwoStrings(
-          lineText,
-          pdfPreviewParams.quote
-        );
-        if (score > bestMatchScore) {
-          bestMatchScore = score;
-          bestMatchStartIndex = i;
-          bestMatchEndIndex = j;
-          matchedLines = lines.slice(i, j + 1);
+  const prepareTextLines = useMemo(() => {
+    const lines: PDFTextItem[][] = [];
+    let currentLine: PDFTextItem[] = [];
+    textItems.forEach((item) => {
+      currentLine.push(item);
+      if (item.hasEOL) {
+        lines.push(currentLine);
+        currentLine = [];
+      }
+    });
+    if (currentLine.length > 0) lines.push(currentLine);
+    return lines;
+  }, [textItems]);
+
+  const getTextSegment = useCallback(
+    (line: PDFTextItem[]) => line.map((item) => item.str).join(" "),
+    []
+  );
+
+  const findBestMatch = useCallback(
+    (lines: PDFTextItem[][], quote: string) => {
+      let bestMatch = { score: -1, lines: [] as PDFTextItem[][] };
+      const normalizedQuote = quote.toLowerCase().trim();
+
+      for (let i = 0; i < lines.length; i++) {
+        let combinedText = "";
+        for (let j = i; j < lines.length; j++) {
+          combinedText +=
+            (j > i ? " " : "") + getTextSegment(lines[j]).toLowerCase().trim();
+          const score = stringSimilarity.compareTwoStrings(
+            combinedText,
+            normalizedQuote
+          );
+          if (score > bestMatch.score) {
+            bestMatch = { score, lines: lines.slice(i, j + 1) };
+          }
+          if (combinedText.length > normalizedQuote.length * 1.5) break;
         }
       }
+      return bestMatch;
+    },
+    [getTextSegment]
+  );
+
+  const drawHighlight = useCallback(
+    (
+      context: CanvasRenderingContext2D,
+      canvasHeight: number,
+      items: PDFTextItem[]
+    ) => {
+      context.fillStyle = "rgba(255, 255, 0, 0.3)";
+      items.forEach((item) => {
+        const [x, y, w, h] = [
+          item.transform[4],
+          canvasHeight - item.transform[5] - item.height,
+          item.width,
+          item.height,
+        ];
+        context.fillRect(x, y, w, h);
+      });
+    },
+    []
+  );
+
+  const applyHighlight = useCallback(() => {
+    const canvas = canvasRefs.current[pdfPreviewParams.pageNumber - 1];
+    if (!canvas || textItems.length === 0) return;
+
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    const pdfPage = pdfRef.current?.querySelector(
+      `.react-pdf__Page[data-page-number="${pdfPreviewParams.pageNumber}"]`
+    ) as HTMLElement | null;
+
+    if (!pdfPage) {
+      console.error("PDF page element not found");
+      return;
     }
 
-    if (bestMatchStartIndex === -1 || bestMatchEndIndex === -1) {
+    canvas.width = pdfPage.clientWidth;
+    canvas.height = pdfPage.clientHeight;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    const bestMatch = findBestMatch(prepareTextLines, pdfPreviewParams.quote);
+
+    if (bestMatch.lines.length === 0) {
       console.error("No close match found for the quote");
       return;
     }
 
-    // Highlight the matched lines
-    context.fillStyle = "rgba(255, 255, 0, 0.3)"; // Yellow with low opacity
-    matchedLines.flat().forEach((item) => {
-      const [x, y, w, h] = [
-        item.transform[4],
-        canvas.height - item.transform[5] - item.height,
-        item.width,
-        item.height,
-      ];
-      context.fillRect(x, y, w, h);
-    });
-  }, [textItems]);
+    drawHighlight(context, canvas.height, bestMatch.lines.flat());
+  }, [
+    textItems,
+    prepareTextLines,
+    drawHighlight,
+    findBestMatch,
+    pdfPreviewParams.pageNumber,
+    pdfPreviewParams.quote,
+  ]);
 
   // Memoize the page components to prevent unnecessary re-renders
   const pageComponents = useMemo(
@@ -193,9 +228,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (textItems.length !== 0) {
-      applyHighlight().catch((error) =>
-        console.error("Error applying highlight:", error)
-      );
+      applyHighlight();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [textItems]);
