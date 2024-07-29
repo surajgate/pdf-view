@@ -9,6 +9,8 @@ import React, {
 import { Document, Page, pdfjs } from "react-pdf";
 import stringSimilarity from "string-similarity";
 
+import "react-pdf/dist/Page/TextLayer.css";
+
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 const url = "https://research.google.com/pubs/archive/44678.pdf";
 
@@ -30,7 +32,8 @@ const App: React.FC = () => {
 
   const pdfPreviewParams = {
     pageNumber: 3,
-    quote: "Abstract",
+    quote:
+      "In summary, our contributions are as follows. First, we show how to combine online MCMC methods with model distillation in order to get a simple",
   };
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
 
@@ -90,36 +93,60 @@ const App: React.FC = () => {
     // Clear the canvas
     context.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Find the best match
-    const texts = textItems.map((item) => item.str);
-    console.log(textItems);
+    // Separate text items into lines
+    const lines: PDFTextItem[][] = [];
+    let currentLine: PDFTextItem[] = [];
+    textItems.forEach((item) => {
+      currentLine.push(item);
+      if (item.hasEOL) {
+        lines.push(currentLine);
+        currentLine = [];
+      }
+    });
+    if (currentLine.length > 0) lines.push(currentLine);
 
-    const bestMatch = stringSimilarity.findBestMatch(
-      pdfPreviewParams.quote,
-      texts
-    );
+    // Match the quote across lines
+    let bestMatchStartIndex = -1;
+    let bestMatchEndIndex = -1;
+    let bestMatchScore = -Infinity;
+    let matchedLines: PDFTextItem[][] = [];
 
-    if (bestMatch.bestMatch.rating > 0.7) {
-      const bestMatchItem = textItems[bestMatch.bestMatchIndex];
-
-      // Get the viewport
-      const viewport = pdfPage.getBoundingClientRect();
-
-      // Calculate highlight position and dimensions
-      const [x, y, w, h] = [
-        bestMatchItem.transform[4],
-        viewport.height - bestMatchItem.transform[5] - bestMatchItem.height,
-        bestMatchItem.width,
-        bestMatchItem.height + 2,
-      ];
-
-      // Create a semi-transparent highlight
-
-      context.fillStyle = "rgba(255, 255, 0, 0.3)"; // Yellow with low opacity
-      context.fillRect(x, y, w, h);
-    } else {
-      console.error("No close match found for the quote");
+    for (let i = 0; i < lines.length; i++) {
+      for (let j = i; j < lines.length; j++) {
+        const lineText = lines
+          .slice(i, j + 1)
+          .flat()
+          .map((item) => item.str)
+          .join(" ");
+        const score = stringSimilarity.compareTwoStrings(
+          lineText,
+          pdfPreviewParams.quote
+        );
+        if (score > bestMatchScore) {
+          bestMatchScore = score;
+          bestMatchStartIndex = i;
+          bestMatchEndIndex = j;
+          matchedLines = lines.slice(i, j + 1);
+        }
+      }
     }
+
+    if (bestMatchStartIndex === -1 || bestMatchEndIndex === -1) {
+      console.error("No close match found for the quote");
+      return;
+    }
+
+    // Highlight the matched lines
+    context.fillStyle = "rgba(255, 255, 0, 0.3)"; // Yellow with low opacity
+    matchedLines.flat().forEach((item) => {
+      const [x, y, w, h] = [
+        item.transform[4],
+        canvas.height - item.transform[5] - item.height,
+        item.width,
+        item.height,
+      ];
+      context.fillRect(x, y, w, h);
+    });
   }, [textItems]);
 
   // Memoize the page components to prevent unnecessary re-renders
