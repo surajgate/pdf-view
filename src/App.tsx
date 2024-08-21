@@ -11,8 +11,11 @@ import stringSimilarity from "string-similarity";
 
 import "react-pdf/dist/Page/TextLayer.css";
 
+import debounce from "lodash/debounce";
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 const url = "https://research.google.com/pubs/archive/44678.pdf";
+
+const PAGES_TO_LOAD = 5;
 
 interface PDFTextItem {
   dir: string;
@@ -30,30 +33,78 @@ const App: React.FC = () => {
   const [renderedPages, setRenderedPages] = useState<number[]>([]);
   const [textItems, setTextItems] = useState<PDFTextItem[]>([]);
 
+  const [visiblePages, setVisiblePages] = useState<number[]>([]);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+
   const pdfPreviewParams = {
-    pageNumber: 3,
+    pageNumber: 144,
     quote: "Second, we show that our probabilistic predictions lead to imp",
   };
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
 
   const pdfRef = useRef<HTMLDivElement>(null);
 
-  const pdfUrl = `http://localhost:5000/proxy?url=${encodeURIComponent(url)}`;
+  // const pdfUrl = `http://localhost:5000/proxy?url=${encodeURIComponent(url)}`;
+  const pdfUrl = `http://localhost:5000/pdf`;
 
-  const scrollToPage = (pageNumber: number) => {
-    if (pdfRef.current) {
+  // const scrollToPage = (pageNumber: number) => {
+  //   if (pdfRef.current) {
+  //     const pageHeight =
+  //       pdfRef.current.querySelector(".react-pdf__Page")?.clientHeight || 0;
+  //     const scrollPosition = (pageNumber - 1) * pageHeight;
+  //     pdfRef.current.scrollTo({
+  //       top: scrollPosition,
+  //       behavior: "smooth",
+  //     });
+  //   }
+  // };
+
+  const loadVisiblePages = useCallback(
+    (centerPage: number) => {
+      const start = Math.max(1, centerPage - PAGES_TO_LOAD);
+      const end = Math.min(numPages, centerPage + PAGES_TO_LOAD);
+      setVisiblePages((prevPages) => {
+        const newPages = Array.from(
+          { length: end - start + 1 },
+          (_, i) => start + i
+        );
+        return [...new Set([...prevPages, ...newPages])].sort((a, b) => a - b);
+      });
+    },
+    [numPages]
+  );
+
+  const handleScroll = useCallback(
+    debounce(() => {
+      if (!pdfRef.current) return;
+
+      const scrollPosition = pdfRef.current.scrollTop;
+      const containerHeight = pdfRef.current.clientHeight;
       const pageHeight =
         pdfRef.current.querySelector(".react-pdf__Page")?.clientHeight || 0;
-      const scrollPosition = (pageNumber - 1) * pageHeight;
-      pdfRef.current.scrollTo({
-        top: scrollPosition,
-        behavior: "smooth",
-      });
-    }
-  };
+      if (pageHeight === 0) return;
+
+      const currentPage = Math.floor(scrollPosition / pageHeight) + 1;
+      const visiblePages = Math.ceil(containerHeight / pageHeight);
+
+      loadVisiblePages(currentPage);
+
+      // Load more pages if we're near the top or bottom
+      if (currentPage - PAGES_TO_LOAD <= 1) {
+        loadVisiblePages(Math.max(1, currentPage - PAGES_TO_LOAD));
+      } else if (currentPage + PAGES_TO_LOAD >= numPages) {
+        loadVisiblePages(Math.min(numPages, currentPage + PAGES_TO_LOAD));
+      }
+    }, 200),
+    [loadVisiblePages, numPages]
+  );
 
   const onLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
+    setIsLoading(false);
+    // setTimeout(() => {
+    //   scrollToPage(pdfPreviewParams.pageNumber);
+    // }, 500);
   };
 
   const onRenderSuccess = (pageNumber: number) => {
@@ -184,20 +235,78 @@ const App: React.FC = () => {
     pdfPreviewParams.quote,
   ]);
 
+  useEffect(() => {
+    const pdfElement = pdfRef.current;
+    if (pdfElement) {
+      pdfElement.addEventListener("scroll", handleScroll);
+    }
+    return () => {
+      if (pdfElement) {
+        pdfElement.removeEventListener("scroll", handleScroll);
+      }
+    };
+  }, [handleScroll]);
+
+  useEffect(() => {
+    if (numPages > 0) {
+      loadVisiblePages(pdfPreviewParams.pageNumber);
+    }
+  }, [numPages, pdfPreviewParams.pageNumber, loadVisiblePages]);
+
+  useEffect(() => {
+    if (!isLoading && pdfRef.current) {
+      const pageHeight =
+        pdfRef.current.querySelector(".react-pdf__Page")?.clientHeight || 0;
+      if (pageHeight > 0) {
+        pdfRef.current.scrollTop =
+          (pdfPreviewParams.pageNumber - 1) * pageHeight;
+      }
+    }
+  }, [isLoading, pdfPreviewParams.pageNumber]);
+
+  useEffect(() => {
+    observerRef.current = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const pageNumber = parseInt(
+              entry.target.getAttribute("data-page-number") || "0",
+              10
+            );
+            if (pageNumber && !renderedPages.includes(pageNumber)) {
+              onRenderSuccess(pageNumber);
+            }
+          }
+        });
+      },
+      { root: pdfRef.current, rootMargin: "200px", threshold: 0.1 }
+    );
+
+    return () => {
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+      }
+    };
+  }, [renderedPages]);
+
   // Memoize the page components to prevent unnecessary re-renders
   const pageComponents = useMemo(
     () =>
-      Array.from(new Array(numPages), (_, index) => (
-        <div key={`page_${index + 1}`} style={{ position: "relative" }}>
+      visiblePages.map((pageNumber) => (
+        <div
+          key={`page_${pageNumber}`}
+          style={{ position: "relative" }}
+          data-page-number={pageNumber}
+        >
           <Page
-            pageNumber={index + 1}
+            pageNumber={pageNumber}
             renderTextLayer={true}
             renderAnnotationLayer={false}
-            onRenderSuccess={() => onRenderSuccess(index + 1)}
+            onRenderSuccess={() => onRenderSuccess(pageNumber)}
           />
           <canvas
             ref={(canvas) => {
-              if (canvas) canvasRefs.current[index] = canvas;
+              if (canvas) canvasRefs.current[pageNumber - 1] = canvas;
             }}
             style={{
               position: "absolute",
@@ -208,21 +317,29 @@ const App: React.FC = () => {
           />
         </div>
       )),
-    [numPages, onRenderSuccess]
+    [visiblePages]
   );
 
   useEffect(() => {
-    if (numPages > 0 && renderedPages.length === numPages) {
-      setIsLoading(false);
-      setTimeout(() => {
-        scrollToPage(pdfPreviewParams.pageNumber);
-      }, 500);
+    if (observerRef.current) {
+      document.querySelectorAll("[data-page-number]").forEach((el) => {
+        observerRef.current?.observe(el);
+      });
     }
-    if (
-      renderedPages.includes(pdfPreviewParams.pageNumber) &&
-      textItems.length === 0
-    )
-      loadPdfText();
+  }, [pageComponents]);
+
+  useEffect(() => {
+    // if (numPages > 0 && renderedPages.length === numPages) {
+    //   setIsLoading(false);
+    //   setTimeout(() => {
+    //     scrollToPage(pdfPreviewParams.pageNumber);
+    //   }, 500);
+    // }
+    // if (
+    //   renderedPages.includes(pdfPreviewParams.pageNumber) &&
+    //   textItems.length === 0
+    // )
+    loadPdfText();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [numPages, renderedPages, pdfPreviewParams.pageNumber]);
 
@@ -276,9 +393,7 @@ const App: React.FC = () => {
                 alignItems: "center",
                 justifyContent: "center",
               }}
-            >
-              <p>{`${Math.round((renderedPages.length / numPages) * 100)}%`}</p>
-            </div>
+            ></div>
           </div>
           <p>Loading your PDF, this won't take long.</p>
         </div>
